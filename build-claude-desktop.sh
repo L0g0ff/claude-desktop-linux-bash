@@ -1,15 +1,70 @@
 #!/bin/bash
+#
+# Build script for Claude Desktop on Linux
+# Supports both DNF and Debian/Ubuntu (apt) based systems
+#
+# This script downloads the Windows version of Claude Desktop and
+# creates a Linux-compatible version with native bindings.
+#
+# Usage: ./build-claude-desktop.sh
+#
+# Dependencies will be checked and installation instructions provided
+# for the detected package manager (dnf or apt-get)
+
 set -euo pipefail
 
 # Configuration
-CLAUDE_VERSION="0.7.7"
+CLAUDE_VERSION="0.7.8"  # Updated to match current version
 CLAUDE_URL="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
 WORK_DIR="$(pwd)/claude-build"
 OUTPUT_DIR="$(pwd)/claude-desktop"
 
+# Package definitions for different distributions
+DNF_PACKAGES="p7zip p7zip-plugins nodejs rust cargo electron ImageMagick icoutils"
+DEBIAN_PACKAGES="p7zip-full nodejs cargo rustc electron imagemagick icoutils"
+
+# Logging functions
+log_info() {
+    echo -e "\033[0;32m[INFO]\033[0m $1"
+}
+
+log_error() {
+    echo -e "\033[0;31m[ERROR]\033[0m $1" >&2
+}
+
+log_warning() {
+    echo -e "\033[0;33m[WARNING]\033[0m $1"
+}
+
+# Error handling
+handle_error() {
+    log_error "An error occurred on line $1"
+    exit 1
+}
+
+trap 'handle_error $LINENO' ERR
+
+# Detect package manager and set appropriate commands/packages
+detect_package_manager() {
+    if command -v dnf >/dev/null 2>&1; then
+        log_info "DNF-based system detected"
+        PKG_MANAGER="dnf"
+        PKG_INSTALL="sudo dnf install -y"
+        PACKAGES="$DNF_PACKAGES"
+    elif command -v apt-get >/dev/null 2>&1; then
+        log_info "Debian-based system detected"
+        PKG_MANAGER="apt"
+        PKG_INSTALL="sudo apt-get install -y"
+        PACKAGES="$DEBIAN_PACKAGES"
+    else
+        log_error "Unsupported package manager. This script supports dnf and apt (Debian/Ubuntu)"
+        exit 1
+    fi
+}
+
 # Check for required dependencies
 check_dependencies() {
-    local deps=("p7zip" "pnpm" "node" "cargo" "rustc" "electron" "convert" "wrestool" "icotool")
+    local deps=("7za" "pnpm" "node" "cargo" "rustc" "electron" "magick" "wrestool" "icotool")
     local missing=()
     
     for dep in "${deps[@]}"; do
@@ -19,20 +74,22 @@ check_dependencies() {
     done
     
     if [ ${#missing[@]} -ne 0 ]; then
-        echo "Missing required dependencies: ${missing[*]}"
-        echo "Please install them using:"
-        echo "sudo apt-get install p7zip-full pnpm nodejs cargo rustc electron imagemagick icoutils"
+        detect_package_manager
+        log_warning "Missing required dependencies: ${missing[*]}"
+        log_info "Please install them using:"
+        echo "${PKG_INSTALL} ${PACKAGES}"
+        log_info "And install pnpm using: curl -fsSL https://get.pnpm.io/install.sh | sh -"
         exit 1
     fi
 }
 
 # Create and setup the patchy-cnb native module
 setup_patchy_cnb() {
-    echo "Setting up patchy-cnb..."
+    log_info "Setting up patchy-cnb native module..."
     mkdir -p "$WORK_DIR/patchy-cnb"
     cd "$WORK_DIR/patchy-cnb"
     
-    # Create Cargo.toml
+    # Create Cargo.toml with minimal dependencies
     cat > Cargo.toml << 'EOF'
 [package]
 name = "patchy-cnb"
@@ -47,7 +104,7 @@ napi = { version = "2.12.2", default-features = false, features = ["napi4"] }
 napi-derive = "2.12.2"
 EOF
 
-    # Create src/lib.rs with stub implementations
+    # Create stub implementation for native bindings
     mkdir -p src
     cat > src/lib.rs << 'EOF'
 #![deny(clippy::all)]
@@ -547,65 +604,129 @@ EOF
 }
 EOF
 
-    # Install dependencies and build
-    pnpm install
-    pnpm run build
+    # Build native module with error handling
+    log_info "Building native module..."
+    if ! pnpm install; then
+        log_error "Failed to install dependencies for native module"
+        exit 1
+    fi
+
+    if ! pnpm run build; then
+        log_error "Failed to build native module"
+        exit 1
+    fi
+
+    # Verify build output
+    if [ ! -f "patchy-cnb.linux-x64-gnu.node" ]; then
+        log_error "Native module build failed - output file not found"
+        exit 1
+    fi
 }
 
 # Download and extract the Windows client
 download_and_extract() {
-    echo "Downloading Claude Desktop..."
+    log_info "Downloading Claude Desktop..."
     mkdir -p "$WORK_DIR"
     cd "$WORK_DIR"
     
     if [ ! -f "Claude-Setup-x64.exe" ]; then
-        wget "$CLAUDE_URL" -O "Claude-Setup-x64.exe"
+        wget "$CLAUDE_URL" -O "Claude-Setup-x64.exe" || {
+            log_error "Failed to download Claude Desktop"
+            exit 1
+        }
     fi
     
-    echo "Extracting..."
-    7z x -y "Claude-Setup-x64.exe"
-    7z x -y "AnthropicClaude-${CLAUDE_VERSION}-full.nupkg"
+    log_info "Extracting..."
+    7z x -y "Claude-Setup-x64.exe" || {
+        log_error "Failed to extract Claude-Setup-x64.exe"
+        exit 1
+    }
+    
+    # Find the actual nupkg file instead of assuming the name
+    NUPKG_FILE=$(find . -name "*.nupkg" | head -n 1)
+    if [ -z "$NUPKG_FILE" ]; then
+        log_error "Could not find .nupkg file"
+        exit 1
+    fi
+    
+    7z x -y "$NUPKG_FILE" || {
+        log_error "Failed to extract $NUPKG_FILE"
+        exit 1
+    }
 }
 
 # Process icons
 process_icons() {
-    echo "Processing icons..."
+    log_info "Processing icons..."
     cd "$WORK_DIR"
     
-    wrestool -x -t 14 "lib/net45/claude.exe" -o claude.ico
-    icotool -x claude.ico
+    wrestool -x -t 14 "lib/net45/claude.exe" -o claude.ico || {
+        log_error "Failed to extract icons from claude.exe"
+        exit 1
+    }
+    
+    icotool -x claude.ico || {
+        log_error "Failed to convert ico file"
+        exit 1
+    }
     
     mkdir -p "$OUTPUT_DIR/share/icons/hicolor"
     for size in 16 24 32 48 64 256; do
         mkdir -p "$OUTPUT_DIR/share/icons/hicolor/${size}x${size}/apps"
-        convert "claude_*${size}x${size}x32.png" "$OUTPUT_DIR/share/icons/hicolor/${size}x${size}/apps/claude.png"
+        magick "claude_*${size}x${size}x32.png" \
+            "$OUTPUT_DIR/share/icons/hicolor/${size}x${size}/apps/claude.png" || {
+            log_warning "Failed to convert icon for size ${size}x${size}"
+        }
     done
 }
 
 # Process and repackage app.asar
 process_asar() {
-    echo "Processing app.asar..."
+    log_info "Processing app.asar..."
     cd "$WORK_DIR"
     
     mkdir -p "$OUTPUT_DIR/lib/claude-desktop"
-    cp "lib/net45/resources/app.asar" "$OUTPUT_DIR/lib/claude-desktop/"
-    cp -r "lib/net45/resources/app.asar.unpacked" "$OUTPUT_DIR/lib/claude-desktop/"
+    cp "lib/net45/resources/app.asar" "$OUTPUT_DIR/lib/claude-desktop/" || {
+        log_error "Failed to copy app.asar"
+        exit 1
+    }
+    
+    cp -r "lib/net45/resources/app.asar.unpacked" "$OUTPUT_DIR/lib/claude-desktop/" || {
+        log_error "Failed to copy app.asar.unpacked"
+        exit 1
+    }
     
     cd "$OUTPUT_DIR/lib/claude-desktop"
-    npx asar extract app.asar app.asar.contents
+    npx asar extract app.asar app.asar.contents || {
+        log_error "Failed to extract app.asar"
+        exit 1
+    }
     
     # Replace native bindings
     cp "$WORK_DIR/patchy-cnb/patchy-cnb.linux-x64-gnu.node" \
-        "app.asar.contents/node_modules/claude-native/claude-native-binding.node"
+        "app.asar.contents/node_modules/claude-native/claude-native-binding.node" || {
+        log_error "Failed to copy native binding to app.asar.contents"
+        exit 1
+    }
+    
     cp "$WORK_DIR/patchy-cnb/patchy-cnb.linux-x64-gnu.node" \
-        "app.asar.unpacked/node_modules/claude-native/claude-native-binding.node"
+        "app.asar.unpacked/node_modules/claude-native/claude-native-binding.node" || {
+        log_error "Failed to copy native binding to app.asar.unpacked"
+        exit 1
+    }
     
     # Copy Tray icons
     mkdir -p app.asar.contents/resources
-    cp "$WORK_DIR/lib/net45/resources/Tray"* app.asar.contents/resources/
+    cp "$WORK_DIR/lib/net45/resources/Tray"* app.asar.contents/resources/ || {
+        log_error "Failed to copy tray icons"
+        exit 1
+    }
     
     # Repackage app.asar
-    npx asar pack app.asar.contents app.asar
+    npx asar pack app.asar.contents app.asar || {
+        log_error "Failed to repackage app.asar"
+        exit 1
+    }
 }
 
 # Create desktop entry
@@ -640,9 +761,36 @@ EOF
     chmod +x "$OUTPUT_DIR/bin/claude-desktop"
 }
 
+# Create installation instructions based on detected system
+create_install_instructions() {
+    log_info "Build complete! Claude Desktop is available in: $OUTPUT_DIR"
+    log_info "To install, run the following commands:"
+    
+    # Common directories setup
+    echo "mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons"
+    echo "cp $OUTPUT_DIR/bin/claude-desktop ~/.local/bin/"
+    echo "cp $OUTPUT_DIR/share/applications/claude-desktop.desktop ~/.local/share/applications/"
+    echo "cp -r $OUTPUT_DIR/share/icons/* ~/.local/share/icons/"
+    
+    # System-specific commands
+    if command -v dnf >/dev/null 2>&1; then
+        # Fedora-specific
+        echo "update-desktop-database ~/.local/share/applications"
+    elif command -v apt-get >/dev/null 2>&1; then
+        # Debian/Ubuntu-specific
+        echo "update-desktop-database ~/.local/share/applications"
+        echo "# You might need to install update-desktop-database if not present:"
+        echo "# sudo apt-get install desktop-file-utils"
+    fi
+    
+    # Protocol handler setup
+    echo -e "\nTo enable Claude protocol handler (for Google login), run:"
+    echo "xdg-mime default claude-desktop.desktop x-scheme-handler/claude"
+}
+
 # Main execution
 main() {
-    echo "Building Claude Desktop for Linux..."
+    log_info "Building Claude Desktop for Linux..."
     check_dependencies
     
     # Create clean build environment
@@ -655,9 +803,7 @@ main() {
     process_asar
     create_desktop_entry
     create_launcher
-    
-    echo "Build complete! Claude Desktop is available in: $OUTPUT_DIR"
-    echo "You can run it using: $OUTPUT_DIR/bin/claude-desktop"
+    create_install_instructions
 }
 
 main "$@"
