@@ -62,9 +62,21 @@ detect_package_manager() {
     fi
 }
 
+# Check for the correct ImageMagick command
+check_image_command() {
+    if command -v magick >/dev/null 2>&1; then
+        IMAGE_CMD="magick"
+    elif command -v convert >/dev/null 2>&1; then
+        IMAGE_CMD="convert"
+    else
+        return 1
+    fi
+    return 0
+}
+
 # Check for required dependencies
 check_dependencies() {
-    local deps=("7za" "pnpm" "node" "cargo" "rustc" "electron" "magick" "wrestool" "icotool")
+    local deps=("7za" "pnpm" "node" "cargo" "rustc" "electron" "wrestool" "icotool")
     local missing=()
     
     for dep in "${deps[@]}"; do
@@ -73,6 +85,11 @@ check_dependencies() {
         fi
     done
     
+    # Check for either magick or convert
+    if ! check_image_command; then
+        missing+=("ImageMagick")
+    fi
+
     if [ ${#missing[@]} -ne 0 ]; then
         detect_package_manager
         log_warning "Missing required dependencies: ${missing[*]}"
@@ -673,7 +690,7 @@ process_icons() {
     mkdir -p "$OUTPUT_DIR/share/icons/hicolor"
     for size in 16 24 32 48 64 256; do
         mkdir -p "$OUTPUT_DIR/share/icons/hicolor/${size}x${size}/apps"
-        magick "claude_*${size}x${size}x32.png" \
+        $IMAGE_CMD "claude_*${size}x${size}x32.png" \
             "$OUTPUT_DIR/share/icons/hicolor/${size}x${size}/apps/claude.png" || {
             log_warning "Failed to convert icon for size ${size}x${size}"
         }
