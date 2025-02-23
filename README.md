@@ -7,11 +7,14 @@ The build script assumes that you already have node, pnpm, rust, and cargo insta
 1. First, install the required dependencies:
 
 ```bash
-# Install system packages
-sudo apt-get install p7zip-full imagemagick icoutils
-
-# Install electron globally via npm
-sudo pnpm install -g electron
+# Prep the ubuntu system (I use distorobox Ubuntu 22.04)
+sudo apt-get install p7zip-full imagemagick icoutils git
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt update
+sudo apt-get install -y nodejs
+git clone https://github.com/L0g0ff/claude-desktop-linux-bash.git
+cd claude-desktop-linux-bash/
+sudo npm install -g electron@19.0.0 --unsafe-perm=true
 ```
 
 2. Run the build script:
